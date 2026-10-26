@@ -1,19 +1,15 @@
 #include <QApplication>
+#include <QCoreApplication>
 #include <QMainWindow>
 #include <QWidget>
-#include <QDialog>
-#include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QHeaderView>
 #include <QPushButton>
 #include <QLabel>
-#include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QGroupBox>
 #include <QFormLayout>
 #include <QStatusBar>
-#include <QMessageBox>
-#include <QFile>
 #include <QDir>
 #include <QFileInfo>
 #include <QTextStream>
@@ -22,9 +18,11 @@
 #include <QBrush>
 #include <QColor>
 #include <QAbstractItemView>
-#include <QByteArray>
+#include <QRegularExpression>
 
 #include <algorithm>
+
+#include "DiagnosticsDialog.h"
 
 struct VideoDriver
 {
@@ -79,6 +77,8 @@ private:
             "<h2>Graphics Hardware &amp; Drivers</h2>"
             "<p>Detected graphics devices and kernel driver status.</p>"
         );
+
+        QPushButton *diagnosticsButton = new QPushButton("Run Diagnostics");
 
         mainLayout->addWidget(title);
 
@@ -139,6 +139,10 @@ private:
         QHBoxLayout *buttonLayout = new QHBoxLayout();
 
         buttonLayout->addStretch();
+        buttonLayout->addWidget(diagnosticsButton);
+        buttonLayout->addWidget(refreshButton);
+        //buttonLayout->addWidget(closeButton);
+
 
         refreshButton = new QPushButton("Refresh");
         QPushButton *closeButton = new QPushButton("Close");
@@ -173,6 +177,18 @@ private:
             this,
             &VideoDriverManager::showSelectedDriver
         );
+
+        connect(
+    diagnosticsButton,
+    &QPushButton::clicked,
+    this,
+    [this]()
+    {
+        DiagnosticsDialog dialog(this);
+        dialog.exec();
+    }
+);
+
     }
 
     // Read a sysfs text attribute.
@@ -503,21 +519,164 @@ private slots:
     }
 };
 
+namespace
+{
+QString diagnosticStatusText(CheckStatus status)
+{
+    switch (status)
+    {
+    case CheckStatus::Passed:    return "PASS";
+    case CheckStatus::Warning:   return "WARNING";
+    case CheckStatus::Failed:    return "FAIL";
+    case CheckStatus::NotChecked: return "NOT CHECKED";
+    }
+    return "UNKNOWN";
+}
+
+QStringList wrapCell(const QString &text, int width)
+{
+    const QString value = text.isEmpty() ? QString("-") : text;
+    QStringList lines;
+    QString line;
+
+    const QStringList words = value.split(QRegularExpression("\\s+"),
+                                          Qt::SkipEmptyParts);
+    for (const QString &word : words)
+    {
+        if (line.isEmpty())
+        {
+            line = word;
+        }
+        else if (line.size() + 1 + word.size() <= width)
+        {
+            line += " " + word;
+        }
+        else
+        {
+            lines << line;
+            line = word;
+        }
+
+        // Break unusually long tokens so a single path/error string does
+        // not make the table wider than the terminal-friendly column.
+        while (line.size() > width)
+        {
+            lines << line.left(width);
+            line = line.mid(width);
+        }
+    }
+
+    if (!line.isEmpty())
+        lines << line;
+    if (lines.isEmpty())
+        lines << "-";
+    return lines;
+}
+
+int runBatchDiagnostics()
+{
+    DiagnosticsEngine engine;
+    const DiagnosticReport report = engine.runDiagnostics();
+
+    const QStringList headers = {
+        "Diagnostic", "Status", "Result", "Recommendation"
+    };
+    const int widths[] = {24, 12, 42, 48};
+
+    auto border = [&]() {
+        QString line = "+";
+        for (int width : widths)
+            line += QString(width + 2, '-') + "+";
+        return line;
+    };
+
+    auto printRow = [&](const QStringList &cells) {
+        QList<QStringList> wrapped;
+        int rowHeight = 1;
+        for (int i = 0; i < cells.size(); ++i)
+        {
+            wrapped << QStringList{};
+            wrapped[i] = wrapCell(cells[i], widths[i]);
+            rowHeight = qMax(rowHeight, wrapped[i].size());
+        }
+
+        for (int row = 0; row < rowHeight; ++row)
+        {
+            QString line = "|";
+            for (int col = 0; col < cells.size(); ++col)
+            {
+                const QString value = row < wrapped[col].size()
+                    ? wrapped[col][row] : QString();
+                line += " " + value.leftJustified(widths[col]) + " |";
+            }
+            QTextStream(stdout) << line << Qt::endl;
+        }
+    };
+
+    QTextStream out(stdout);
+    out << border() << Qt::endl;
+    printRow(headers);
+    out << border() << Qt::endl;
+
+    for (const DiagnosticResult &result : report.checks)
+    {
+        printRow({
+            result.name,
+            diagnosticStatusText(result.status),
+            result.summary,
+            result.recommendation
+        });
+        out << border() << Qt::endl;
+    }
+
+    out << "Summary: "
+        << report.passedCount << " passed, "
+        << report.warningCount << " warnings, "
+        << report.failedCount << " failed, "
+        << report.notCheckedCount << " not checked."
+        << Qt::endl;
+
+    return 0;
+}
+}
+
 int main(int argc, char *argv[])
 {
+    bool batchMode = false;
+    for (int i = 1; i < argc; ++i)
+    {
+        if (QString::fromLocal8Bit(argv[i]) == "--batch")
+        {
+            batchMode = true;
+        }
+        else
+        {
+            QTextStream(stderr) << "Unknown argument: "
+                                << QString::fromLocal8Bit(argv[i])
+                                << Qt::endl
+                                << "Usage: " << argv[0]
+                                << " [--batch]" << Qt::endl;
+            return 2;
+        }
+    }
+
+    if (batchMode)
+    {
+        QCoreApplication app(argc, argv);
+        QCoreApplication::setApplicationName("Video Driver Manager");
+        QCoreApplication::setApplicationVersion("1.0.0");
+        return runBatchDiagnostics();
+    }
+
     QApplication app(argc, argv);
-
-    QApplication::setApplicationName(
-        "Video Driver Manager"
-    );
-
+    QApplication::setApplicationName("Video Driver Manager");
     QApplication::setApplicationVersion("1.0.0");
 
     VideoDriverManager window;
-
     window.show();
 
     return app.exec();
 }
 
 #include "main.moc"
+

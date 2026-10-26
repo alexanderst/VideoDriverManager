@@ -3,8 +3,7 @@
 Simple utility for Ubuntu to check status of video system.
 By default GUI application is started.
 
-By command 
+The command for running in batch mode is
 ```
 VideoDriverManager --batch
 ```
-it is running in shell.
